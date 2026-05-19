@@ -31,7 +31,6 @@ import os
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-import anthropic
 from dotenv import load_dotenv
 
 from . import cache
@@ -42,12 +41,12 @@ from .compression import count_tokens
 from .knowledge.extractor import extract
 from .knowledge.merger import merge_objects
 from .knowledge.store import load_all, save, semantic_search, semantic_search_multi, video_indexed
+from .llm import get_answer_client, provider_label
 from .transcript import fetch_transcript, merge_into_chunks
 from .youtube_search import search as youtube_search
 
 load_dotenv()
 
-_SONNET_MODEL = os.getenv("CLAUDE_MODEL", "claude-sonnet-4-6")
 _CONTEXT_BUDGET = int(os.getenv("CONTEXT_BUDGET_TOKENS", "6000"))
 
 
@@ -147,27 +146,23 @@ def run(
         print(f"[brief] {total_obj} objects, types: {types_present}, "
               f"~{brief.total_tokens} tokens")
 
-    # ── 8. Sonnet: answer from structured brief ──────────────────────────────
+    # ── 8. LLM: answer from structured brief ─────────────────────────────────
     system_prompt, user_prompt = build_prompt(brief, title)
     context_tokens = count_tokens(system_prompt) + count_tokens(user_prompt)
 
-    client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
-    response = client.messages.create(
-        model=_SONNET_MODEL,
-        max_tokens=1024,
-        system=system_prompt,
-        messages=[{"role": "user", "content": user_prompt}],
-    )
-    answer = response.content[0].text
-    output_tokens = response.usage.output_tokens
+    llm = get_answer_client()
+    resp = llm.complete(system_prompt, user_prompt, max_tokens=1024)
+    answer = resp.text
 
-    # Cost: Sonnet $3/$15 per MTok
-    cost_usd = (context_tokens / 1e6 * 3.0) + (output_tokens / 1e6 * 15.0)
+    if verbose:
+        print(f"[answer] {provider_label()} | {resp.input_tokens}+{resp.output_tokens} tok"
+              f" | ¥{resp.cost_usd * 150:.2f}")
+
     cost = {
-        "input_tokens": context_tokens,
-        "output_tokens": output_tokens,
-        "total_usd": round(cost_usd, 5),
-        "total_jpy": round(cost_usd * 150, 2),
+        "input_tokens": resp.input_tokens,
+        "output_tokens": resp.output_tokens,
+        "total_usd": round(resp.cost_usd, 5),
+        "total_jpy": round(resp.cost_usd * 150, 2),
     }
 
     result = {
@@ -332,7 +327,7 @@ def run_search(
         print(f"[brief] {total_obj} objects, types: {types_present}, "
               f"~{brief.total_tokens} tokens")
 
-    # ── 10. Sonnet: answer from structured brief ──────────────────────────────
+    # ── 10. LLM: answer from structured brief ────────────────────────────────
     video_titles = ", ".join(
         v["title"] for v in videos if v["id"] in indexed_ids
     )
@@ -340,22 +335,19 @@ def run_search(
     system_prompt, user_prompt = build_prompt(brief, effective_title)
     context_tokens = count_tokens(system_prompt) + count_tokens(user_prompt)
 
-    client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
-    response = client.messages.create(
-        model=_SONNET_MODEL,
-        max_tokens=1024,
-        system=system_prompt,
-        messages=[{"role": "user", "content": user_prompt}],
-    )
-    answer = response.content[0].text
-    output_tokens = response.usage.output_tokens
+    llm = get_answer_client()
+    resp = llm.complete(system_prompt, user_prompt, max_tokens=1024)
+    answer = resp.text
 
-    cost_usd = (context_tokens / 1e6 * 3.0) + (output_tokens / 1e6 * 15.0)
+    if verbose:
+        print(f"[answer] {provider_label()} | {resp.input_tokens}+{resp.output_tokens} tok"
+              f" | ¥{resp.cost_usd * 150:.2f}")
+
     cost = {
-        "input_tokens": context_tokens,
-        "output_tokens": output_tokens,
-        "total_usd": round(cost_usd, 5),
-        "total_jpy": round(cost_usd * 150, 2),
+        "input_tokens": resp.input_tokens,
+        "output_tokens": resp.output_tokens,
+        "total_usd": round(resp.cost_usd, 5),
+        "total_jpy": round(resp.cost_usd * 150, 2),
     }
 
     result = {

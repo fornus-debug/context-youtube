@@ -1,27 +1,19 @@
 """
 Knowledge extraction — one LLM call per video (not per query).
 
-Uses Claude Haiku (cheapest model) to process the compressed transcript
-and output a typed JSON array of KnowledgeObjects.
+Provider is selected via LLM_PROVIDER env var (default: anthropic):
+  anthropic → Claude Haiku   ~¥1/video
+  gemini    → Gemini Flash   無料
+  groq      → Llama 3.3 70B  無料
 
-Cost: ~$0.005–0.01 per video (one-time, result cached permanently).
-Query time: ZERO LLM. All serving is from pre-extracted knowledge.
-
-This is the core distinction from RAG:
-  RAG     — LLM at every query
-  This    — LLM once per video, algorithmic retrieval forever after
+Result cached permanently in SQLite+ChromaDB — zero cost on repeat queries.
 """
 
 import json
-import os
 import re
-import uuid
 
-import anthropic
-
-from .schema import KnowledgeObject, KnowledgeType, ALL_TYPES
-
-_HAIKU_MODEL = "claude-haiku-4-5-20251001"
+from .schema import KnowledgeObject, ALL_TYPES
+from ..llm import get_extract_client, provider_label
 
 _EXTRACTION_SYSTEM = """\
 You are a knowledge extraction engine. Your output feeds an AI reasoning system, NOT a human.
@@ -52,13 +44,11 @@ _VALID_TYPES = set(ALL_TYPES)
 
 def _parse_response(raw: str, video_id: str) -> list[KnowledgeObject]:
     """Parse LLM JSON output into KnowledgeObjects. Tolerant of partial failures."""
-    # Strip markdown code fences if present
     raw = re.sub(r"```(?:json)?\s*", "", raw).strip()
 
     try:
         items = json.loads(raw)
     except json.JSONDecodeError:
-        # Try to recover a partial array
         match = re.search(r"\[.*\]", raw, re.DOTALL)
         if not match:
             return []
@@ -98,34 +88,27 @@ def extract(
 ) -> list[KnowledgeObject]:
     """
     Extract knowledge objects from a compressed transcript.
-    Single Haiku call — cheap, one-time per video.
+    Single LLM call — one-time per video, result cached permanently.
     """
-    client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+    client = get_extract_client()
 
-    prompt = (
+    user = (
         f"Extract all knowledge objects from this transcript.\n\n"
         f"Source: YouTube video {video_id}\n\n"
         f"TRANSCRIPT:\n{compressed_transcript}\n\n"
         f"Output the JSON array now:"
     )
 
-    response = client.messages.create(
-        model=_HAIKU_MODEL,
-        max_tokens=4096,
-        system=_EXTRACTION_SYSTEM,
-        messages=[{"role": "user", "content": prompt}],
-    )
-
-    raw = response.content[0].text
-    objects = _parse_response(raw, video_id)
+    resp = client.complete(_EXTRACTION_SYSTEM, user, max_tokens=4096)
+    objects = _parse_response(resp.text, video_id)
 
     if verbose:
-        type_counts = {}
+        type_counts: dict[str, int] = {}
         for obj in objects:
             type_counts[obj.type] = type_counts.get(obj.type, 0) + 1
-        print(f"[extract] {len(objects)} knowledge objects: {type_counts}")
-        cost_usd = (response.usage.input_tokens / 1e6 * 0.25 +
-                    response.usage.output_tokens / 1e6 * 1.25)
-        print(f"[extract] Haiku cost: ${cost_usd:.4f} (¥{cost_usd*150:.2f})")
+        label = provider_label()
+        cost_jpy = resp.cost_usd * 150
+        print(f"[extract] {len(objects)} objects via {label}: "
+              f"¥{cost_jpy:.2f} | {type_counts}")
 
     return objects
