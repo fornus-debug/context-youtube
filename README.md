@@ -39,28 +39,55 @@ Result Cache
 
 目標の月1,000〜5,000円に収まる。キャッシュヒット率が上がれば更に安価。
 
-## セットアップ
+## セットアップ & 起動
+
+### 1. APIキーを設定
+
+```bash
+cp .env.example .env
+```
+
+`.env` を編集して使いたいプロバイダのキーを設定：
+
+```bash
+# 有料 (デフォルト) — Claude Haiku + Sonnet
+LLM_PROVIDER=anthropic
+ANTHROPIC_API_KEY=sk-ant-...
+
+# 完全無料 — Gemini 1.5 Flash
+# LLM_PROVIDER=gemini
+# GEMINI_API_KEY=...
+
+# 完全無料 — Groq Llama 3.3 70B
+# LLM_PROVIDER=groq
+# GROQ_API_KEY=...
+```
+
+### 2. ウェブアプリとして起動
 
 ```bash
 pip install -r requirements.txt
-cp .env.example .env
-# .env に ANTHROPIC_API_KEY を設定
+bash start.sh
 ```
 
-## 使い方
+ブラウザで **http://localhost:3000** を開く。
+
+> または `make start` でも同じ（`make` が使えない場合は `bash start.sh`）
+
+### CLI として使う場合
 
 ```bash
 # 基本
-python main.py "https://www.youtube.com/watch?v=VIDEO_ID" "この動画の主なポイントは何ですか？"
+python main.py "https://www.youtube.com/watch?v=VIDEO_ID" "この動画の主なポイントは？"
 
-# タイトル指定 + 詳細出力
-python main.py dQw4w9WgXcQ "What does the speaker discuss?" --title "My Video" -v
+# 詳細ログ付き
+python main.py VIDEO_ID "query" -v
 
 # JSON出力
 python main.py VIDEO_ID "query" --json
 
-# キャッシュ無視して再取得
-python main.py VIDEO_ID "query" --refresh
+# 抽出済み知識ベースの確認
+python main.py VIDEO_ID --inspect
 ```
 
 ## ファイル構成
@@ -84,10 +111,12 @@ tests/            # ユニットテスト (22件)
 
 | 変数 | デフォルト | 説明 |
 |------|-----------|------|
+| `LLM_PROVIDER` | `anthropic` | `anthropic` / `gemini` / `groq` |
 | `CONTEXT_BUDGET_TOKENS` | 6000 | LLMに渡す最大トークン数 |
 | `CACHE_TTL_SECONDS` | 86400 | キャッシュ有効期間 (秒) |
 | `EMBEDDING_MODEL` | all-MiniLM-L6-v2 | Sentence Transformersモデル |
-| `CLAUDE_MODEL` | claude-sonnet-4-6 | 使用するClaudeモデル |
+| `EXTRACT_MODEL` | (プロバイダ依存) | 知識抽出用モデルの上書き |
+| `ANSWER_MODEL` | (プロバイダ依存) | 回答生成用モデルの上書き |
 
 ## テスト
 
