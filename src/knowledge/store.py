@@ -182,6 +182,56 @@ def semantic_search(
     return hits
 
 
+def semantic_search_multi(
+    video_ids: list[str],
+    query: str,
+    top_k: int = 20,
+) -> list[tuple[KnowledgeObject, float]]:
+    """
+    Search across multiple videos' ChromaDB collections and merge results.
+
+    Searches each video's collection independently (because ChromaDB collections
+    are per-video), merges the (object, score) tuples, and returns the top_k
+    overall by similarity score descending.
+
+    Args:
+        video_ids: List of video IDs whose collections to search.
+        query:     Natural-language query string.
+        top_k:     Maximum number of results to return after merging.
+
+    Returns:
+        List of (KnowledgeObject, similarity_score) tuples, descending by score.
+    """
+    model = _get_model()
+    query_vec = model.encode([query], show_progress_bar=False).tolist()
+
+    conn = _get_conn()
+    all_hits: list[tuple[KnowledgeObject, float]] = []
+
+    for video_id in video_ids:
+        col = _chroma_collection(video_id)
+        if col.count() == 0:
+            continue
+
+        n = min(top_k, col.count())
+        results = col.query(
+            query_embeddings=query_vec,
+            n_results=n,
+            include=["metadatas", "distances"],
+        )
+
+        for obj_id, dist in zip(results["ids"][0], results["distances"][0]):
+            row = conn.execute(
+                "SELECT * FROM knowledge_objects WHERE id = ?", (obj_id,)
+            ).fetchone()
+            if row:
+                all_hits.append((_row_to_obj(row), 1.0 - dist))
+
+    # Merge and keep top_k by similarity
+    all_hits.sort(key=lambda x: x[1], reverse=True)
+    return all_hits[:top_k]
+
+
 def video_indexed(video_id: str) -> bool:
     conn = _get_conn()
     row = conn.execute(

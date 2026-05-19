@@ -29,6 +29,7 @@ Flow:
 
 import os
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import anthropic
 from dotenv import load_dotenv
@@ -39,8 +40,10 @@ from .compiler.query_parser import primary_types
 from .compiler.ranker import rank
 from .compression import count_tokens
 from .knowledge.extractor import extract
-from .knowledge.store import load_all, save, semantic_search, video_indexed
+from .knowledge.merger import merge_objects
+from .knowledge.store import load_all, save, semantic_search, semantic_search_multi, video_indexed
 from .transcript import fetch_transcript, merge_into_chunks
+from .youtube_search import search as youtube_search
 
 load_dotenv()
 
@@ -179,4 +182,192 @@ def run(
 
     # ── 9. Cache result ──────────────────────────────────────────────────────
     cache.set(video_id, query, result)
+    return result
+
+
+# ── Search pipeline ──────────────────────────────────────────────────────────
+
+def _process_video(video_id: str, force_refresh: bool, verbose: bool) -> list:
+    """
+    Fetch transcript, extract knowledge objects, and persist for a single video.
+    Returns the list of KnowledgeObjects stored (or already present).
+    Called in parallel by run_search.
+    """
+    if video_indexed(video_id) and not force_refresh:
+        if verbose:
+            objs = load_all(video_id)
+            print(f"[extract:{video_id}] Already indexed ({len(objs)} objects)")
+        return load_all(video_id)
+
+    if verbose:
+        print(f"[transcript:{video_id}] Fetching...")
+    segments = fetch_transcript(video_id)
+    chunks = merge_into_chunks(segments, chunk_tokens=120, overlap_segments=1)
+    if verbose:
+        print(f"[transcript:{video_id}] {len(segments)} segments → {len(chunks)} chunks")
+
+    if verbose:
+        print(f"[extract:{video_id}] Running Haiku extraction...")
+    compressed = _compress_for_extraction(chunks)
+    objects = extract(video_id, compressed, verbose=verbose)
+    save(objects)
+    return objects
+
+
+def run_search(
+    query: str,
+    max_videos: int = 3,
+    title: str = "",
+    force_refresh: bool = False,
+    verbose: bool = False,
+) -> dict:
+    """
+    Full pipeline: YouTube search → multi-video knowledge extraction → unified brief → answer.
+
+    Flow:
+        1. Cache check (keyed by "search::{query}")
+        2. Search YouTube for query → up to max_videos results
+        3. For each video (parallel): fetch transcript + Haiku extraction
+        4. Load all KnowledgeObjects for all videos
+        5. Cross-video deduplication via merger
+        6. Semantic search across all videos' ChromaDB collections (merged)
+        7. Rank the unified candidate pool
+        8. Assemble structured KnowledgeBrief
+        9. Sonnet answer
+        10. Cache result
+
+    Returns:
+        {
+            "answer": str,
+            "cached": bool,
+            "videos_searched": list[dict],   # [{id, title, duration}, ...]
+            "knowledge_objects_used": int,
+            "types_in_brief": list[str],
+            "context_tokens": int,
+            "cost": dict,
+        }
+    """
+    # ── 1. Cache check ──────────────────────────────────────────────────────
+    _SEARCH_NS = "search"
+    if not force_refresh:
+        hit = cache.get(_SEARCH_NS, query)
+        if hit:
+            if verbose:
+                print("[cache] HIT (search query)")
+            return {**hit, "cached": True}
+
+    # ── 2. YouTube search ───────────────────────────────────────────────────
+    if verbose:
+        print(f"[search] Querying YouTube: '{query}' (max {max_videos})...")
+    videos = youtube_search(query, max_results=max_videos)
+    if not videos:
+        return {
+            "answer": "No YouTube videos found for the query.",
+            "cached": False,
+            "videos_searched": [],
+            "knowledge_objects_used": 0,
+            "types_in_brief": [],
+            "context_tokens": 0,
+            "cost": {"input_tokens": 0, "output_tokens": 0, "total_usd": 0.0, "total_jpy": 0.0},
+        }
+    if verbose:
+        for v in videos:
+            print(f"[search] Found: {v['id']} — {v['title']} ({v['duration']}s)")
+
+    # ── 3. Parallel transcript fetch + knowledge extraction ─────────────────
+    video_ids = [v["id"] for v in videos]
+    objects_by_video: dict[str, list] = {}
+
+    with ThreadPoolExecutor(max_workers=min(len(video_ids), 4)) as pool:
+        future_to_id = {
+            pool.submit(_process_video, vid, force_refresh, verbose): vid
+            for vid in video_ids
+        }
+        for future in as_completed(future_to_id):
+            vid = future_to_id[future]
+            try:
+                objects_by_video[vid] = future.result()
+            except Exception as exc:
+                if verbose:
+                    print(f"[warn] Video {vid} failed: {exc}")
+                objects_by_video[vid] = []
+
+    # ── 4. Load all objects (ensure all are from store) ─────────────────────
+    for vid in video_ids:
+        if not objects_by_video.get(vid):
+            objects_by_video[vid] = load_all(vid)
+
+    # ── 5. Cross-video deduplication ─────────────────────────────────────────
+    merged = merge_objects(objects_by_video)
+    if verbose:
+        total_before = sum(len(v) for v in objects_by_video.values())
+        print(f"[merge] {total_before} objects → {len(merged)} after dedup")
+
+    # ── 6. Query parsing ─────────────────────────────────────────────────────
+    priority = primary_types(query, top_n=4)
+    if verbose:
+        print(f"[query] Priority types: {priority}")
+
+    # ── 7. Semantic search across all videos' collections ────────────────────
+    indexed_ids = [vid for vid in video_ids if video_indexed(vid)]
+    candidates_raw = semantic_search_multi(indexed_ids, query, top_k=40)
+
+    # Filter candidates to only those present in the merged (deduplicated) pool
+    merged_ids = {obj.id for obj in merged}
+    candidates = [(obj, score) for obj, score in candidates_raw if obj.id in merged_ids]
+    if verbose:
+        print(f"[search] {len(candidates_raw)} raw candidates → "
+              f"{len(candidates)} after dedup filter")
+
+    # ── 8. Rank ──────────────────────────────────────────────────────────────
+    ranked = rank(candidates, query, priority, total_duration=0.0)
+
+    # ── 9. Assemble structured KnowledgeBrief ────────────────────────────────
+    # Use a synthetic "multi-video" identifier for the brief
+    multi_id = "+".join(video_ids[:3])
+    brief = assemble(ranked, query, multi_id, priority, _CONTEXT_BUDGET)
+    if verbose:
+        types_present = list(brief.objects_by_type.keys())
+        total_obj = sum(len(v) for v in brief.objects_by_type.values())
+        print(f"[brief] {total_obj} objects, types: {types_present}, "
+              f"~{brief.total_tokens} tokens")
+
+    # ── 10. Sonnet: answer from structured brief ──────────────────────────────
+    video_titles = ", ".join(
+        v["title"] for v in videos if v["id"] in indexed_ids
+    )
+    effective_title = title or video_titles
+    system_prompt, user_prompt = build_prompt(brief, effective_title)
+    context_tokens = count_tokens(system_prompt) + count_tokens(user_prompt)
+
+    client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+    response = client.messages.create(
+        model=_SONNET_MODEL,
+        max_tokens=1024,
+        system=system_prompt,
+        messages=[{"role": "user", "content": user_prompt}],
+    )
+    answer = response.content[0].text
+    output_tokens = response.usage.output_tokens
+
+    cost_usd = (context_tokens / 1e6 * 3.0) + (output_tokens / 1e6 * 15.0)
+    cost = {
+        "input_tokens": context_tokens,
+        "output_tokens": output_tokens,
+        "total_usd": round(cost_usd, 5),
+        "total_jpy": round(cost_usd * 150, 2),
+    }
+
+    result = {
+        "answer": answer,
+        "cached": False,
+        "videos_searched": videos,
+        "knowledge_objects_used": sum(len(v) for v in brief.objects_by_type.values()),
+        "types_in_brief": list(brief.objects_by_type.keys()),
+        "context_tokens": context_tokens,
+        "cost": cost,
+    }
+
+    # ── 11. Cache result ──────────────────────────────────────────────────────
+    cache.set(_SEARCH_NS, query, result)
     return result
