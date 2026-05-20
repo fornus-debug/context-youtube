@@ -90,41 +90,38 @@ python main.py VIDEO_ID "query" --json
 python main.py VIDEO_ID --inspect
 ```
 
-## iPadやスマホからどこでも使う（Vercel + Railway）
+## iPadやスマホからどこでも使う（Vercel + Render）
 
-フロントエンドをVercel（無料）、バックエンドをRailway（無料枠）にデプロイすると
+フロントエンドをVercel（無料）、バックエンドをRender（無料枠）にデプロイすると
 どのデバイス・どのネットワークからでもアクセスできる。
 
-### Step 1 — バックエンドをRailwayにデプロイ
+> **Renderの無料枠**: 15分間アクセスがないとスリープする。次のアクセス時に30秒ほど起動に時間がかかるが、機能は問題ない。
 
-1. [railway.app](https://railway.app) でアカウント作成
-2. 「New Project」→「Deploy from GitHub repo」でこのリポジトリを選択
-3. 「Variables」タブで環境変数を設定：
+### Step 1 — バックエンドをRenderにデプロイ
 
-   ```
-   LLM_PROVIDER=anthropic          # or gemini / groq
-   ANTHROPIC_API_KEY=sk-ant-...    # 選んだプロバイダのキー
-   ALLOWED_ORIGINS=https://your-app.vercel.app  # ← Step 2で決まるURL
-   ```
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/Fornus-debug/context-youtube)
 
-4. デプロイ完了後、`Settings > Networking` でURLをコピー（例: `https://xxx.railway.app`）
+ボタンをクリック後、「Environment Variables」で以下を設定：
 
-> **データ永続化について**: Railwayの無料枠はファイルストレージが再起動でリセットされる。
-> 動画の再抽出は自動で行われるので機能は問題ないが、キャッシュは失われる。
-> 永続化したい場合はRailway Volume（有料）を追加してください。
+```
+LLM_PROVIDER=anthropic          # or gemini / groq
+ANTHROPIC_API_KEY=sk-ant-...    # 選んだプロバイダのキー
+ALLOWED_ORIGINS=https://your-app.vercel.app  # ← Step 2で決まるURL（後で更新可）
+```
+
+デプロイ完了後に表示されるURL（例: `https://context-youtube-api.onrender.com`）をコピー。
 
 ### Step 2 — フロントエンドをVercelにデプロイ
 
-[![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https%3A%2F%2Fgithub.com%2FFornus-debug%2Fcontext-youtube&root-directory=frontend&env=BACKEND_URL&envDescription=Railway%E3%83%90%E3%83%83%E3%82%AF%E3%82%A8%E3%83%B3%E3%83%89%E3%81%AEURL%20%28%E4%BE%8B%3A%20https%3A%2F%2Fxxx.railway.app%29&envLink=https%3A%2F%2Fgithub.com%2FFornus-debug%2Fcontext-youtube%23step-1---%E3%83%90%E3%83%83%E3%82%AF%E3%82%A8%E3%83%B3%E3%83%89%E3%82%92railway%E3%81%AB%E3%83%87%E3%83%97%E3%83%AD%E3%82%A4&project-name=context-youtube&repository-name=context-youtube)
+[![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https%3A%2F%2Fgithub.com%2FFornus-debug%2Fcontext-youtube&root-directory=frontend&env=BACKEND_URL&envDescription=Render%E3%83%90%E3%83%83%E3%82%AF%E3%82%A8%E3%83%B3%E3%83%89%E3%81%AEURL%20%28%E4%BE%8B%3A%20https%3A%2F%2Fxxx.onrender.com%29&project-name=context-youtube&repository-name=context-youtube)
 
-ボタンをクリック → `BACKEND_URL` にStep 1のRailway URLを入力 → Deploy。
+ボタンをクリック → `BACKEND_URL` にStep 1のRenderのURLを入力 → Deploy。
 
-デプロイ完了後に発行されたURL（例: `https://your-app.vercel.app`）をコピーして、
-RailwayのVariablesの `ALLOWED_ORIGINS` に設定して再デプロイ。
+デプロイ完了後のURL（例: `https://your-app.vercel.app`）をRenderの `ALLOWED_ORIGINS` に設定して再デプロイ。
 
 ### 完成
 
-`https://your-app.vercel.app` をiPadのSafariで開いてホーム画面に追加すると
+`https://your-app.vercel.app` をiPadのSafariで開いて「ホーム画面に追加」すると
 アプリのように使えます。
 
 ---
