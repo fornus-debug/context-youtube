@@ -115,18 +115,12 @@ python main.py VIDEO_ID --inspect
 
 ### Step 2 — フロントエンドをVercelにデプロイ
 
-1. [vercel.com](https://vercel.com) でアカウント作成
-2. 「Add New Project」→ このリポジトリをインポート
-3. **Root Directory を `frontend` に変更**（重要）
-4. 「Environment Variables」に追加：
+[![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https%3A%2F%2Fgithub.com%2FFornus-debug%2Fcontext-youtube&root-directory=frontend&env=BACKEND_URL&envDescription=Railway%E3%83%90%E3%83%83%E3%82%AF%E3%82%A8%E3%83%B3%E3%83%89%E3%81%AEURL%20%28%E4%BE%8B%3A%20https%3A%2F%2Fxxx.railway.app%29&envLink=https%3A%2F%2Fgithub.com%2FFornus-debug%2Fcontext-youtube%23step-1---%E3%83%90%E3%83%83%E3%82%AF%E3%82%A8%E3%83%B3%E3%83%89%E3%82%92railway%E3%81%AB%E3%83%87%E3%83%97%E3%83%AD%E3%82%A4&project-name=context-youtube&repository-name=context-youtube)
 
-   ```
-   BACKEND_URL=https://xxx.railway.app   # ← Step 1のRailway URL
-   ```
+ボタンをクリック → `BACKEND_URL` にStep 1のRailway URLを入力 → Deploy。
 
-5. デプロイ → 発行されたURL（例: `https://your-app.vercel.app`）をコピー
-
-6. RailwayのVariablesの `ALLOWED_ORIGINS` をVercelのURLに更新して再デプロイ
+デプロイ完了後に発行されたURL（例: `https://your-app.vercel.app`）をコピーして、
+RailwayのVariablesの `ALLOWED_ORIGINS` に設定して再デプロイ。
 
 ### 完成
 
