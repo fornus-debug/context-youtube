@@ -90,6 +90,51 @@ python main.py VIDEO_ID "query" --json
 python main.py VIDEO_ID --inspect
 ```
 
+## iPadやスマホからどこでも使う（Vercel + Railway）
+
+フロントエンドをVercel（無料）、バックエンドをRailway（無料枠）にデプロイすると
+どのデバイス・どのネットワークからでもアクセスできる。
+
+### Step 1 — バックエンドをRailwayにデプロイ
+
+1. [railway.app](https://railway.app) でアカウント作成
+2. 「New Project」→「Deploy from GitHub repo」でこのリポジトリを選択
+3. 「Variables」タブで環境変数を設定：
+
+   ```
+   LLM_PROVIDER=anthropic          # or gemini / groq
+   ANTHROPIC_API_KEY=sk-ant-...    # 選んだプロバイダのキー
+   ALLOWED_ORIGINS=https://your-app.vercel.app  # ← Step 2で決まるURL
+   ```
+
+4. デプロイ完了後、`Settings > Networking` でURLをコピー（例: `https://xxx.railway.app`）
+
+> **データ永続化について**: Railwayの無料枠はファイルストレージが再起動でリセットされる。
+> 動画の再抽出は自動で行われるので機能は問題ないが、キャッシュは失われる。
+> 永続化したい場合はRailway Volume（有料）を追加してください。
+
+### Step 2 — フロントエンドをVercelにデプロイ
+
+1. [vercel.com](https://vercel.com) でアカウント作成
+2. 「Add New Project」→ このリポジトリをインポート
+3. **Root Directory を `frontend` に変更**（重要）
+4. 「Environment Variables」に追加：
+
+   ```
+   BACKEND_URL=https://xxx.railway.app   # ← Step 1のRailway URL
+   ```
+
+5. デプロイ → 発行されたURL（例: `https://your-app.vercel.app`）をコピー
+
+6. RailwayのVariablesの `ALLOWED_ORIGINS` をVercelのURLに更新して再デプロイ
+
+### 完成
+
+`https://your-app.vercel.app` をiPadのSafariで開いてホーム画面に追加すると
+アプリのように使えます。
+
+---
+
 ## ファイル構成
 
 ```
