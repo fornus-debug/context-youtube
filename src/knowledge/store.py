@@ -25,11 +25,11 @@ from .schema import KnowledgeObject, KnowledgeType
 _DB_PATH = Path(os.getenv("KNOWLEDGE_DB", ".knowledge_db"))
 _CHROMA_PATH = os.getenv("CHROMA_PATH", ".chroma_db")
 
-_ef: DefaultEmbeddingFunction | None = None
-_chroma: chromadb.ClientAPI | None = None
+_ef = None
+_chroma = None
 
 
-def _get_ef() -> DefaultEmbeddingFunction:
+def _get_ef():
     global _ef
     if _ef is None:
         _ef = DefaultEmbeddingFunction()
