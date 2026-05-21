@@ -18,23 +18,22 @@ from pathlib import Path
 
 import chromadb
 from chromadb.config import Settings
-from sentence_transformers import SentenceTransformer
+from chromadb.utils.embedding_functions import DefaultEmbeddingFunction
 
 from .schema import KnowledgeObject, KnowledgeType
 
 _DB_PATH = Path(os.getenv("KNOWLEDGE_DB", ".knowledge_db"))
 _CHROMA_PATH = os.getenv("CHROMA_PATH", ".chroma_db")
-_EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "all-MiniLM-L6-v2")
 
-_model: SentenceTransformer | None = None
+_ef: DefaultEmbeddingFunction | None = None
 _chroma: chromadb.ClientAPI | None = None
 
 
-def _get_model() -> SentenceTransformer:
-    global _model
-    if _model is None:
-        _model = SentenceTransformer(_EMBEDDING_MODEL)
-    return _model
+def _get_ef() -> DefaultEmbeddingFunction:
+    global _ef
+    if _ef is None:
+        _ef = DefaultEmbeddingFunction()
+    return _ef
 
 
 def _get_chroma() -> chromadb.ClientAPI:
@@ -84,7 +83,7 @@ def save(objects: list[KnowledgeObject]) -> None:
         return
 
     conn = _get_conn()
-    model = _get_model()
+    ef = _get_ef()
 
     # SQLite upsert
     conn.executemany(
@@ -106,7 +105,7 @@ def save(objects: list[KnowledgeObject]) -> None:
     video_id = objects[0].video_id
     col = _chroma_collection(video_id)
     texts = [f"{obj.type}: {obj.content}" for obj in objects]
-    vectors = model.encode(texts, batch_size=64, show_progress_bar=False).tolist()
+    vectors = ef(texts)
     col.upsert(
         ids=[obj.id for obj in objects],
         embeddings=vectors,
@@ -152,7 +151,7 @@ def semantic_search(
     Returns (object, similarity_score) pairs, descending.
     Optionally filtered to specific knowledge types.
     """
-    model = _get_model()
+    ef = _get_ef()
     col = _chroma_collection(video_id)
     if col.count() == 0:
         return []
@@ -161,7 +160,7 @@ def semantic_search(
     if type_filter:
         where = {"type": {"$in": list(type_filter)}}
 
-    query_vec = model.encode([query], show_progress_bar=False).tolist()
+    query_vec = ef([query])
     results = col.query(
         query_embeddings=query_vec,
         n_results=min(top_k, col.count()),
@@ -202,8 +201,8 @@ def semantic_search_multi(
     Returns:
         List of (KnowledgeObject, similarity_score) tuples, descending by score.
     """
-    model = _get_model()
-    query_vec = model.encode([query], show_progress_bar=False).tolist()
+    ef = _get_ef()
+    query_vec = ef([query])
 
     conn = _get_conn()
     all_hits: list[tuple[KnowledgeObject, float]] = []
