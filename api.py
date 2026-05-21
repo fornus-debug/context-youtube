@@ -18,11 +18,6 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from src.knowledge.store import load_all, video_indexed, save
-from src.knowledge.extractor import extract
-from src.pipeline import run, run_search
-from src.transcript import fetch_transcript, merge_into_chunks
-
 app = FastAPI(
     title="AI Context Generation Engine",
     description="Knowledge Compiler pipeline: YouTube search → structured knowledge extraction → LLM answer",
@@ -131,13 +126,7 @@ def health() -> HealthResponse:
 
 @app.post("/api/query", response_model=QueryResponse, tags=["pipeline"])
 def query(req: QueryRequest) -> QueryResponse:
-    """
-    Full pipeline: YouTube search → multi-video knowledge extraction → answer.
-
-    This is the primary endpoint. It searches YouTube for relevant videos,
-    extracts structured knowledge objects (cached per-video), assembles a
-    ranked brief, and answers with Claude Sonnet.
-    """
+    from src.pipeline import run_search
     try:
         result = run_search(
             query=req.query,
@@ -173,12 +162,9 @@ def query(req: QueryRequest) -> QueryResponse:
 
 @app.post("/api/extract", response_model=ExtractResponse, tags=["knowledge"])
 def extract_video(req: ExtractRequest) -> ExtractResponse:
-    """
-    Extract and store knowledge objects for a single video.
-
-    If the video is already indexed and force=False, returns the
-    existing objects without making a new LLM call.
-    """
+    from src.knowledge.store import load_all, video_indexed, save
+    from src.knowledge.extractor import extract
+    from src.transcript import fetch_transcript, merge_into_chunks
     try:
         video_id = _extract_video_id(req.video_id)
     except ValueError as exc:
@@ -214,11 +200,7 @@ def extract_video(req: ExtractRequest) -> ExtractResponse:
 
 @app.get("/api/knowledge/{video_id}", response_model=KnowledgeResponse, tags=["knowledge"])
 def get_knowledge(video_id: str) -> KnowledgeResponse:
-    """
-    Retrieve all stored knowledge objects for a video, grouped by type.
-
-    Returns 404 if the video has not been indexed yet.
-    """
+    from src.knowledge.store import load_all, video_indexed
     try:
         vid = _extract_video_id(video_id)
     except ValueError as exc:
@@ -230,7 +212,7 @@ def get_knowledge(video_id: str) -> KnowledgeResponse:
             detail=f"Video '{vid}' has not been indexed. POST /api/extract first.",
         )
 
-    objects = load_all(vid)
+    objects = load_all(vid)  # type: ignore[possibly-undefined]
     objects_by_type: dict[str, list[dict]] = {}
     for obj in objects:
         objects_by_type.setdefault(obj.type, []).append(obj.to_dict())
