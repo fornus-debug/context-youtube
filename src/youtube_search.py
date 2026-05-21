@@ -1,18 +1,71 @@
 """
-YouTube search using yt-dlp Python API (no subprocess overhead).
+YouTube search using YouTube Data API v3 (primary) with yt-dlp fallback.
+
+Set YOUTUBE_API_KEY env var to use the official API (recommended for
+cloud deployments where yt-dlp may be rate-limited by YouTube).
 """
 
+import os
+import re
 from typing import Any
 
 
-_MAX_DURATION = 3600  # skip videos longer than 1 hour
+_MAX_DURATION = 3600
 
 
-def search(query: str, max_results: int = 5) -> list[dict[str, Any]]:
-    try:
-        from yt_dlp import YoutubeDL
-    except ImportError as exc:
-        raise ImportError("yt-dlp is not installed. Run: pip install yt-dlp") from exc
+def _parse_iso8601_duration(s: str) -> int:
+    """PT1H2M3S → seconds."""
+    m = re.match(r"PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?", s or "")
+    if not m:
+        return 0
+    h, mn, sc = (int(x or 0) for x in m.groups())
+    return h * 3600 + mn * 60 + sc
+
+
+def _search_with_api(query: str, max_results: int, api_key: str) -> list[dict[str, Any]]:
+    import urllib.request
+    import urllib.parse
+    import json
+
+    # Step 1: search
+    params = urllib.parse.urlencode({
+        "part": "snippet",
+        "q": query,
+        "type": "video",
+        "maxResults": max_results,
+        "key": api_key,
+    })
+    url = f"https://www.googleapis.com/youtube/v3/search?{params}"
+    with urllib.request.urlopen(url, timeout=15) as r:
+        data = json.loads(r.read())
+
+    video_ids = [item["id"]["videoId"] for item in data.get("items", [])]
+    titles = {item["id"]["videoId"]: item["snippet"]["title"] for item in data.get("items", [])}
+    if not video_ids:
+        return []
+
+    # Step 2: fetch durations
+    params2 = urllib.parse.urlencode({
+        "part": "contentDetails",
+        "id": ",".join(video_ids),
+        "key": api_key,
+    })
+    url2 = f"https://www.googleapis.com/youtube/v3/videos?{params2}"
+    with urllib.request.urlopen(url2, timeout=15) as r:
+        data2 = json.loads(r.read())
+
+    results = []
+    for item in data2.get("items", []):
+        vid = item["id"]
+        duration = _parse_iso8601_duration(item["contentDetails"]["duration"])
+        if duration > _MAX_DURATION:
+            continue
+        results.append({"id": vid, "title": titles.get(vid, ""), "duration": duration})
+    return results
+
+
+def _search_with_ytdlp(query: str, max_results: int) -> list[dict[str, Any]]:
+    from yt_dlp import YoutubeDL
 
     ydl_opts = {
         "quiet": True,
@@ -22,27 +75,28 @@ def search(query: str, max_results: int = 5) -> list[dict[str, Any]]:
         "socket_timeout": 20,
         "retries": 2,
     }
-
-    url = f"ytsearch{max_results}:{query}"
     with YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=False)
+        info = ydl.extract_info(f"ytsearch{max_results}:{query}", download=False)
 
-    entries = (info or {}).get("entries") or []
-    results: list[dict[str, Any]] = []
-    for entry in entries:
+    results = []
+    for entry in (info or {}).get("entries") or []:
         if not entry:
             continue
-        video_id = entry.get("id", "")
-        if not video_id or len(video_id) != 11:
+        vid = entry.get("id", "")
+        if not vid or len(vid) != 11:
             continue
-        title = entry.get("title") or ""
-        duration = entry.get("duration") or 0
         try:
-            duration = int(float(duration))
+            duration = int(float(entry.get("duration") or 0))
         except (ValueError, TypeError):
             continue
         if duration > _MAX_DURATION:
             continue
-        results.append({"id": video_id, "title": title, "duration": duration})
-
+        results.append({"id": vid, "title": entry.get("title") or "", "duration": duration})
     return results
+
+
+def search(query: str, max_results: int = 5) -> list[dict[str, Any]]:
+    api_key = os.getenv("YOUTUBE_API_KEY", "")
+    if api_key:
+        return _search_with_api(query, max_results, api_key)
+    return _search_with_ytdlp(query, max_results)
