@@ -77,8 +77,16 @@ def fetch_transcript(
     """
     try:
         raw = YouTubeTranscriptApi.get_transcript(video_id, languages=list(languages))
-    except (TranscriptsDisabled, NoTranscriptFound) as e:
+    except TranscriptsDisabled as e:
         raise ValueError(f"Transcript unavailable for {video_id}: {e}") from e
+    except NoTranscriptFound:
+        # Preferred languages not found — fall back to any available transcript
+        try:
+            transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
+            transcript = next(iter(transcript_list))
+            raw = transcript.fetch()
+        except Exception as e:
+            raise ValueError(f"Transcript unavailable for {video_id}: {e}") from e
 
     segments: list[Segment] = []
     prev_text = ""
