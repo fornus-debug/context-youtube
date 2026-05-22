@@ -40,7 +40,7 @@ app.add_middleware(
 
 class QueryRequest(BaseModel):
     query: str = Field(..., min_length=1, description="The question to answer")
-    max_videos: int = Field(3, ge=1, le=10, description="Max YouTube videos to search")
+    max_videos: int = Field(5, ge=1, le=10, description="Max YouTube videos to search")
     force_refresh: bool = Field(False, description="Bypass cache and re-extract")
 
 
