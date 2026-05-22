@@ -28,12 +28,11 @@ def _search_with_api(query: str, max_results: int, api_key: str) -> list[dict[st
     import urllib.error
     import json
 
-    # Step 1: search — videoCaption=closedCaption filters to captioned videos only
+    # Step 1: search
     params = urllib.parse.urlencode({
         "part": "snippet",
         "q": query,
         "type": "video",
-        "videoCaption": "closedCaption",
         "maxResults": max_results,
         "key": api_key,
     })
