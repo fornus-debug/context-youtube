@@ -1,11 +1,15 @@
 """
 YouTube transcript fetching and preprocessing.
 Segments raw transcript into chunks with deduplication and noise removal.
+
+Cloud IP blocking: YouTube blocks transcript requests from Render/cloud IPs.
+Set WEBSHARE_PROXY_USERNAME + WEBSHARE_PROXY_PASSWORD (webshare.io free tier)
+or YOUTUBE_PROXY_HTTP / YOUTUBE_PROXY_HTTPS (any HTTP proxy URL) to bypass.
 """
 
+import os
 import re
 from dataclasses import dataclass
-from typing import Optional
 
 from youtube_transcript_api import YouTubeTranscriptApi
 from youtube_transcript_api._errors import TranscriptsDisabled, NoTranscriptFound
@@ -67,6 +71,33 @@ def _is_duplicate(a: str, b: str, threshold: float = 0.85) -> bool:
     return (intersection / union) >= threshold
 
 
+def _make_api() -> YouTubeTranscriptApi:
+    """Build YouTubeTranscriptApi instance with proxy if env vars are set."""
+    ws_user = os.getenv("WEBSHARE_PROXY_USERNAME", "")
+    ws_pass = os.getenv("WEBSHARE_PROXY_PASSWORD", "")
+    if ws_user and ws_pass:
+        from youtube_transcript_api.proxies import WebshareProxyConfig
+        return YouTubeTranscriptApi(
+            proxy_config=WebshareProxyConfig(
+                proxy_username=ws_user,
+                proxy_password=ws_pass,
+            )
+        )
+
+    http_proxy = os.getenv("YOUTUBE_PROXY_HTTP", "")
+    https_proxy = os.getenv("YOUTUBE_PROXY_HTTPS", "") or http_proxy
+    if http_proxy or https_proxy:
+        from youtube_transcript_api.proxies import GenericProxyConfig
+        return YouTubeTranscriptApi(
+            proxy_config=GenericProxyConfig(
+                http_url=http_proxy or None,
+                https_url=https_proxy or None,
+            )
+        )
+
+    return YouTubeTranscriptApi()
+
+
 def fetch_transcript(
     video_id: str,
     languages: tuple[str, ...] = ("ja", "en"),
@@ -75,15 +106,16 @@ def fetch_transcript(
     Fetch and preprocess YouTube transcript.
     Returns cleaned, deduplicated segments.
     """
+    api = _make_api()
     try:
-        raw = YouTubeTranscriptApi.get_transcript(video_id, languages=list(languages))
+        raw = api.fetch(video_id, languages=list(languages))
     except TranscriptsDisabled as e:
         raise ValueError(f"Transcript unavailable for {video_id}: {e}") from e
     except NoTranscriptFound:
         # Preferred languages not found — fall back to any available transcript
         try:
-            transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
-            transcript = next(iter(transcript_list))
+            tl = api.list(video_id)
+            transcript = next(iter(tl))
             raw = transcript.fetch()
         except Exception as e:
             raise ValueError(f"Transcript unavailable for {video_id}: {e}") from e
