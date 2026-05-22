@@ -196,7 +196,12 @@ def _process_video(video_id: str, force_refresh: bool, verbose: bool) -> list:
 
     if verbose:
         print(f"[transcript:{video_id}] Fetching...")
-    segments = fetch_transcript(video_id)
+    try:
+        segments = fetch_transcript(video_id)
+    except Exception as exc:
+        if verbose:
+            print(f"[transcript:{video_id}] No transcript: {exc}")
+        return []  # skip gracefully — no subtitles
     chunks = merge_into_chunks(segments, chunk_tokens=120, overlap_segments=1)
     if verbose:
         print(f"[transcript:{video_id}] {len(segments)} segments → {len(chunks)} chunks")
@@ -293,6 +298,12 @@ def run_search(
             objects_by_video[vid] = load_all(vid)
 
     # ── 5. Cross-video deduplication ─────────────────────────────────────────
+    total_objects = sum(len(v) for v in objects_by_video.values())
+    if total_objects == 0:
+        raise RuntimeError(
+            "None of the found videos have subtitles/captions enabled. "
+            "Try a more specific query or a query in a language with more captioned videos."
+        )
     merged = merge_objects(objects_by_video)
     if verbose:
         total_before = sum(len(v) for v in objects_by_video.values())
