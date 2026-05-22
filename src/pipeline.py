@@ -285,6 +285,7 @@ def run_search(
     video_ids = [v["id"] for v in videos]
     objects_by_video: dict[str, list] = {}
 
+    extraction_errors = []
     with ThreadPoolExecutor(max_workers=min(len(video_ids), 4)) as pool:
         future_to_id = {
             pool.submit(_process_video, vid, force_refresh, verbose): vid
@@ -295,8 +296,7 @@ def run_search(
             try:
                 objects_by_video[vid] = future.result()
             except Exception as exc:
-                if verbose:
-                    print(f"[warn] Video {vid} failed: {exc}")
+                extraction_errors.append(f"{vid}: {exc}")
                 objects_by_video[vid] = []
 
     # ── 4. Load all objects (ensure all are from store) ─────────────────────
@@ -306,6 +306,10 @@ def run_search(
 
     # ── 5. Cross-video deduplication ─────────────────────────────────────────
     merged = merge_objects(objects_by_video)
+    total_objects = sum(len(v) for v in objects_by_video.values())
+    if total_objects == 0:
+        errors_detail = "; ".join(extraction_errors) if extraction_errors else "transcripts may be unavailable or empty"
+        raise RuntimeError(f"Knowledge extraction failed for all videos — {errors_detail}")
     if verbose:
         total_before = sum(len(v) for v in objects_by_video.values())
         print(f"[merge] {total_before} objects → {len(merged)} after dedup")
