@@ -25,6 +25,7 @@ def _parse_iso8601_duration(s: str) -> int:
 def _search_with_api(query: str, max_results: int, api_key: str) -> list[dict[str, Any]]:
     import urllib.request
     import urllib.parse
+    import urllib.error
     import json
 
     # Step 1: search
@@ -36,11 +37,22 @@ def _search_with_api(query: str, max_results: int, api_key: str) -> list[dict[st
         "key": api_key,
     })
     url = f"https://www.googleapis.com/youtube/v3/search?{params}"
-    with urllib.request.urlopen(url, timeout=15) as r:
-        data = json.loads(r.read())
+    try:
+        with urllib.request.urlopen(url, timeout=15) as r:
+            data = json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        raise RuntimeError(f"YouTube API error {e.code}: {e.reason}") from e
 
-    video_ids = [item["id"]["videoId"] for item in data.get("items", [])]
-    titles = {item["id"]["videoId"]: item["snippet"]["title"] for item in data.get("items", [])}
+    items = data.get("items") or []
+    video_ids = []
+    titles = {}
+    for item in items:
+        vid = (item.get("id") or {}).get("videoId")
+        title = (item.get("snippet") or {}).get("title", "")
+        if vid and len(vid) == 11:
+            video_ids.append(vid)
+            titles[vid] = title
+
     if not video_ids:
         return []
 
@@ -51,8 +63,11 @@ def _search_with_api(query: str, max_results: int, api_key: str) -> list[dict[st
         "key": api_key,
     })
     url2 = f"https://www.googleapis.com/youtube/v3/videos?{params2}"
-    with urllib.request.urlopen(url2, timeout=15) as r:
-        data2 = json.loads(r.read())
+    try:
+        with urllib.request.urlopen(url2, timeout=15) as r:
+            data2 = json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        raise RuntimeError(f"YouTube API error {e.code}: {e.reason}") from e
 
     results = []
     for item in data2.get("items", []):

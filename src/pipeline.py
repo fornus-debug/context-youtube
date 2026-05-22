@@ -29,7 +29,18 @@ Flow:
 
 import os
 import re
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
+
+_video_locks: dict[str, threading.Lock] = {}
+_video_locks_lock = threading.Lock()
+
+
+def _get_video_lock(video_id: str) -> threading.Lock:
+    with _video_locks_lock:
+        if video_id not in _video_locks:
+            _video_locks[video_id] = threading.Lock()
+        return _video_locks[video_id]
 
 from dotenv import load_dotenv
 
@@ -186,27 +197,28 @@ def _process_video(video_id: str, force_refresh: bool, verbose: bool) -> list:
     """
     Fetch transcript, extract knowledge objects, and persist for a single video.
     Returns the list of KnowledgeObjects stored (or already present).
-    Called in parallel by run_search.
+    Called in parallel by run_search. Per-video lock prevents duplicate extraction.
     """
-    if video_indexed(video_id) and not force_refresh:
+    with _get_video_lock(video_id):
+        if video_indexed(video_id) and not force_refresh:
+            if verbose:
+                objs = load_all(video_id)
+                print(f"[extract:{video_id}] Already indexed ({len(objs)} objects)")
+            return load_all(video_id)
+
         if verbose:
-            objs = load_all(video_id)
-            print(f"[extract:{video_id}] Already indexed ({len(objs)} objects)")
-        return load_all(video_id)
+            print(f"[transcript:{video_id}] Fetching...")
+        segments = fetch_transcript(video_id)
+        chunks = merge_into_chunks(segments, chunk_tokens=120, overlap_segments=1)
+        if verbose:
+            print(f"[transcript:{video_id}] {len(segments)} segments → {len(chunks)} chunks")
 
-    if verbose:
-        print(f"[transcript:{video_id}] Fetching...")
-    segments = fetch_transcript(video_id)
-    chunks = merge_into_chunks(segments, chunk_tokens=120, overlap_segments=1)
-    if verbose:
-        print(f"[transcript:{video_id}] {len(segments)} segments → {len(chunks)} chunks")
-
-    if verbose:
-        print(f"[extract:{video_id}] Running Haiku extraction...")
-    compressed = _compress_for_extraction(chunks)
-    objects = extract(video_id, compressed, verbose=verbose)
-    save(objects)
-    return objects
+        if verbose:
+            print(f"[extract:{video_id}] Running Haiku extraction...")
+        compressed = _compress_for_extraction(chunks)
+        objects = extract(video_id, compressed, verbose=verbose)
+        save(objects)
+        return objects
 
 
 def run_search(
