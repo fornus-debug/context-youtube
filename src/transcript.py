@@ -98,6 +98,54 @@ def _make_api() -> YouTubeTranscriptApi:
     return YouTubeTranscriptApi()
 
 
+def _fetch_timedtext_direct(video_id: str) -> list[dict] | None:
+    """
+    Fallback: hit YouTube's timedtext endpoint directly (bypasses video-page block).
+    Returns raw segment dicts or None if unavailable.
+    """
+    import urllib.request
+    import json as _json
+
+    for lang in ("ja", "en", ""):
+        params = f"v={video_id}&fmt=json3"
+        if lang:
+            params += f"&lang={lang}"
+        url = f"https://www.youtube.com/api/timedtext?{params}"
+        try:
+            req = urllib.request.Request(url, headers={
+                "User-Agent": (
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/124.0.0.0 Safari/537.36"
+                ),
+                "Accept-Language": "ja,en-US;q=0.9,en;q=0.8",
+                "Referer": f"https://www.youtube.com/watch?v={video_id}",
+            })
+            with urllib.request.urlopen(req, timeout=10) as r:
+                if r.status != 200:
+                    continue
+                data = _json.loads(r.read())
+        except Exception:
+            continue
+
+        segments = []
+        for event in data.get("events", []):
+            segs = event.get("segs", [])
+            if not segs:
+                continue
+            text = "".join(s.get("utf8", "") for s in segs).strip()
+            if text and text.strip() != "\n":
+                segments.append({
+                    "text": text,
+                    "start": event.get("tStartMs", 0) / 1000,
+                    "duration": event.get("dDurationMs", 0) / 1000,
+                })
+        if segments:
+            return segments
+
+    return None
+
+
 def fetch_transcript(
     video_id: str,
     languages: tuple[str, ...] = ("ja", "en"),
@@ -107,18 +155,27 @@ def fetch_transcript(
     Returns cleaned, deduplicated segments.
     """
     api = _make_api()
+    raw = None
     try:
         raw = api.fetch(video_id, languages=list(languages))
     except TranscriptsDisabled as e:
         raise ValueError(f"Transcript unavailable for {video_id}: {e}") from e
     except NoTranscriptFound:
-        # Preferred languages not found — fall back to any available transcript
         try:
             tl = api.list(video_id)
             transcript = next(iter(tl))
             raw = transcript.fetch()
-        except Exception as e:
-            raise ValueError(f"Transcript unavailable for {video_id}: {e}") from e
+        except Exception:
+            pass
+    except Exception:
+        pass  # blocked / network error — try direct fallback below
+
+    if raw is None:
+        direct = _fetch_timedtext_direct(video_id)
+        if direct:
+            raw = direct  # type: ignore[assignment]
+        else:
+            raise ValueError(f"Transcript unavailable for {video_id}")
 
     segments: list[Segment] = []
     prev_text = ""
