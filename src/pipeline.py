@@ -215,7 +215,7 @@ def _process_video(video_id: str, force_refresh: bool, verbose: bool) -> list:
         except Exception as exc:
             if verbose:
                 print(f"[transcript:{video_id}] No transcript: {exc}")
-            return []  # skip gracefully — no subtitles
+            raise  # propagate with real error — run_search will surface it
         chunks = merge_into_chunks(segments, chunk_tokens=120, overlap_segments=1)
         if verbose:
             print(f"[transcript:{video_id}] {len(segments)} segments → {len(chunks)} chunks")
