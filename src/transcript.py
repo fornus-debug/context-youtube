@@ -80,8 +80,31 @@ def _is_duplicate(a: str, b: str, threshold: float = 0.85) -> bool:
     return (intersection / union) >= threshold
 
 
+_COOKIES_PATH = os.getenv("YOUTUBE_COOKIES_FILE", "/etc/secrets/youtube_cookies.txt")
+
+
 def _make_api() -> YouTubeTranscriptApi:
-    """Build YouTubeTranscriptApi instance with proxy if env vars are set."""
+    """Build YouTubeTranscriptApi instance.
+
+    Priority:
+    1. Cookies file (YOUTUBE_COOKIES_FILE or /etc/secrets/youtube_cookies.txt)
+    2. Webshare proxy (WEBSHARE_PROXY_USERNAME + WEBSHARE_PROXY_PASSWORD)
+    3. Generic proxy (YOUTUBE_PROXY_HTTP / YOUTUBE_PROXY_HTTPS)
+    4. No auth (local dev only)
+    """
+    import http.cookiejar
+    import requests
+
+    session: requests.Session | None = None
+    if os.path.exists(_COOKIES_PATH):
+        jar = http.cookiejar.MozillaCookieJar(_COOKIES_PATH)
+        try:
+            jar.load(ignore_discard=True, ignore_expires=True)
+            session = requests.Session()
+            session.cookies = jar  # type: ignore[assignment]
+        except Exception:
+            session = None  # corrupt/empty cookies file — fall through
+
     ws_user = os.getenv("WEBSHARE_PROXY_USERNAME", "")
     ws_pass = os.getenv("WEBSHARE_PROXY_PASSWORD", "")
     if ws_user and ws_pass:
@@ -90,7 +113,8 @@ def _make_api() -> YouTubeTranscriptApi:
             proxy_config=WebshareProxyConfig(
                 proxy_username=ws_user,
                 proxy_password=ws_pass,
-            )
+            ),
+            http_client=session,
         )
 
     http_proxy = os.getenv("YOUTUBE_PROXY_HTTP", "")
@@ -101,10 +125,11 @@ def _make_api() -> YouTubeTranscriptApi:
             proxy_config=GenericProxyConfig(
                 http_url=http_proxy or None,
                 https_url=https_proxy or None,
-            )
+            ),
+            http_client=session,
         )
 
-    return YouTubeTranscriptApi()
+    return YouTubeTranscriptApi(http_client=session)
 
 
 def _fetch_timedtext_direct(video_id: str) -> list[dict] | None:
