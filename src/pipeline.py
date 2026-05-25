@@ -203,7 +203,7 @@ def _process_video(video_id: str, force_refresh: bool, verbose: bool) -> list:
     except Exception as exc:
         if verbose:
             print(f"[transcript:{video_id}] No transcript: {exc}")
-        return []  # skip gracefully — no subtitles
+        raise  # propagate with real error — run_search will surface it
     chunks = merge_into_chunks(segments, chunk_tokens=120, overlap_segments=1)
     if verbose:
         print(f"[transcript:{video_id}] {len(segments)} segments → {len(chunks)} chunks")
@@ -280,6 +280,7 @@ def run_search(
     video_ids = [v["id"] for v in videos]
     objects_by_video: dict[str, list] = {}
 
+    transcript_errors: list[str] = []
     ip_blocked_count = 0
     with ThreadPoolExecutor(max_workers=min(len(video_ids), 4)) as pool:
         future_to_id = {
@@ -292,13 +293,15 @@ def run_search(
                 objects_by_video[vid] = future.result()
             except CloudIpBlockedError as exc:
                 if verbose:
-                    print(f"[warn] Video {vid} blocked by YouTube IP filter: {exc}")
+                    print(f"[warn] Video {vid} IP blocked: {exc}")
                 objects_by_video[vid] = []
                 ip_blocked_count += 1
+                transcript_errors.append(f"{vid}: {exc}")
             except Exception as exc:
                 if verbose:
                     print(f"[warn] Video {vid} failed: {exc}")
                 objects_by_video[vid] = []
+                transcript_errors.append(f"{vid}: {type(exc).__name__}: {exc}")
 
     # ── 4. Load all objects (ensure all are from store) ─────────────────────
     for vid in video_ids:
@@ -308,15 +311,15 @@ def run_search(
     # ── 5. Cross-video deduplication ─────────────────────────────────────────
     total_objects = sum(len(v) for v in objects_by_video.values())
     if total_objects == 0:
+        error_detail = "; ".join(transcript_errors) if transcript_errors else "unknown"
         if ip_blocked_count > 0:
             raise RuntimeError(
                 "YouTube is blocking transcript requests from this server's IP address. "
                 "To fix: set WEBSHARE_PROXY_USERNAME + WEBSHARE_PROXY_PASSWORD "
-                "(webshare.io free tier) or YOUTUBE_PROXY_HTTP env var."
+                f"(webshare.io free tier) or YOUTUBE_PROXY_HTTP env var. Detail: {error_detail}"
             )
         raise RuntimeError(
-            "None of the found videos have subtitles/captions enabled. "
-            "Try a more specific query or a query in a language with more captioned videos."
+            f"Could not fetch transcripts for any of the found videos. Detail: {error_detail}"
         )
     merged = merge_objects(objects_by_video)
     if verbose:
