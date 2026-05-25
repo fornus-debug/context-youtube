@@ -12,7 +12,16 @@ import re
 from dataclasses import dataclass
 
 from youtube_transcript_api import YouTubeTranscriptApi
-from youtube_transcript_api._errors import TranscriptsDisabled, NoTranscriptFound
+from youtube_transcript_api._errors import (
+    TranscriptsDisabled,
+    NoTranscriptFound,
+    YouTubeRequestFailed,
+)
+
+
+class CloudIpBlockedError(ValueError):
+    """YouTube is blocking transcript requests from this cloud IP address."""
+    pass
 
 
 @dataclass
@@ -117,8 +126,24 @@ def fetch_transcript(
             tl = api.list(video_id)
             transcript = next(iter(tl))
             raw = transcript.fetch()
+        except YouTubeRequestFailed as e:
+            if "403" in str(e):
+                raise CloudIpBlockedError(
+                    f"YouTube blocked transcript access for {video_id} (403 Forbidden). "
+                    "Running on a cloud IP — set WEBSHARE_PROXY_USERNAME + "
+                    "WEBSHARE_PROXY_PASSWORD (webshare.io) or YOUTUBE_PROXY_HTTP to bypass."
+                ) from e
+            raise ValueError(f"Transcript unavailable for {video_id}: {e}") from e
         except Exception as e:
             raise ValueError(f"Transcript unavailable for {video_id}: {e}") from e
+    except YouTubeRequestFailed as e:
+        if "403" in str(e):
+            raise CloudIpBlockedError(
+                f"YouTube blocked transcript access for {video_id} (403 Forbidden). "
+                "Running on a cloud IP — set WEBSHARE_PROXY_USERNAME + "
+                "WEBSHARE_PROXY_PASSWORD (webshare.io) or YOUTUBE_PROXY_HTTP to bypass."
+            ) from e
+        raise ValueError(f"Transcript unavailable for {video_id}: {e}") from e
 
     segments: list[Segment] = []
     prev_text = ""

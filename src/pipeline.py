@@ -42,7 +42,7 @@ from .knowledge.extractor import extract
 from .knowledge.merger import merge_objects
 from .knowledge.store import load_all, save, semantic_search, semantic_search_multi, video_indexed
 from .llm import get_answer_client, provider_label
-from .transcript import fetch_transcript, merge_into_chunks
+from .transcript import fetch_transcript, merge_into_chunks, CloudIpBlockedError
 from .youtube_search import search as youtube_search
 
 load_dotenv()
@@ -198,6 +198,8 @@ def _process_video(video_id: str, force_refresh: bool, verbose: bool) -> list:
         print(f"[transcript:{video_id}] Fetching...")
     try:
         segments = fetch_transcript(video_id)
+    except CloudIpBlockedError:
+        raise  # propagate — let run_search report the real cause
     except Exception as exc:
         if verbose:
             print(f"[transcript:{video_id}] No transcript: {exc}")
@@ -278,6 +280,7 @@ def run_search(
     video_ids = [v["id"] for v in videos]
     objects_by_video: dict[str, list] = {}
 
+    ip_blocked_count = 0
     with ThreadPoolExecutor(max_workers=min(len(video_ids), 4)) as pool:
         future_to_id = {
             pool.submit(_process_video, vid, force_refresh, verbose): vid
@@ -287,6 +290,11 @@ def run_search(
             vid = future_to_id[future]
             try:
                 objects_by_video[vid] = future.result()
+            except CloudIpBlockedError as exc:
+                if verbose:
+                    print(f"[warn] Video {vid} blocked by YouTube IP filter: {exc}")
+                objects_by_video[vid] = []
+                ip_blocked_count += 1
             except Exception as exc:
                 if verbose:
                     print(f"[warn] Video {vid} failed: {exc}")
@@ -300,6 +308,12 @@ def run_search(
     # ── 5. Cross-video deduplication ─────────────────────────────────────────
     total_objects = sum(len(v) for v in objects_by_video.values())
     if total_objects == 0:
+        if ip_blocked_count > 0:
+            raise RuntimeError(
+                "YouTube is blocking transcript requests from this server's IP address. "
+                "To fix: set WEBSHARE_PROXY_USERNAME + WEBSHARE_PROXY_PASSWORD "
+                "(webshare.io free tier) or YOUTUBE_PROXY_HTTP env var."
+            )
         raise RuntimeError(
             "None of the found videos have subtitles/captions enabled. "
             "Try a more specific query or a query in a language with more captioned videos."
