@@ -133,25 +133,32 @@ def _make_api() -> YouTubeTranscriptApi:
 
 
 def _fetch_via_ytdlp(video_id: str) -> list[dict] | None:
-    """Fallback using yt-dlp — bypasses cloud-IP 429 rate-limiting."""
+    """Fallback using yt-dlp — bypasses cloud-IP 429 rate-limiting.
+
+    Raises exceptions on yt-dlp failure so callers can surface the root cause.
+    Returns None only when no subtitles are found for any language.
+    """
     try:
         import yt_dlp
         import json as _json
     except ImportError:
         return None
 
-    ydl_opts: dict = {"skip_download": True, "quiet": True, "no_warnings": True}
+    ydl_opts: dict = {
+        "skip_download": True,
+        "quiet": True,
+        "no_warnings": True,
+        "nocheckcertificate": True,
+    }
     if os.path.exists(_COOKIES_PATH):
         ydl_opts["cookiefile"] = _COOKIES_PATH
 
-    try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(
-                f"https://www.youtube.com/watch?v={video_id}",
-                download=False,
-            )
-    except Exception:
-        return None
+    # Let extract_info exceptions propagate — callers need the error detail
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        info = ydl.extract_info(
+            f"https://www.youtube.com/watch?v={video_id}",
+            download=False,
+        )
 
     for lang in ("ja", "en"):
         caps = (info.get("subtitles") or {}).get(lang) or \
@@ -262,17 +269,23 @@ def fetch_transcript(
     except Exception as e:
         api_error = str(e)
 
-    # yt-dlp fallback — handles cloud-IP 429/403 that blocks youtube-transcript-api
+    # yt-dlp fallback — handles cloud-IP blocks that defeat youtube-transcript-api
+    ytdlp_error: str | None = None
     if raw is None:
-        raw = _fetch_via_ytdlp(video_id)  # type: ignore[assignment]
+        try:
+            raw = _fetch_via_ytdlp(video_id)  # type: ignore[assignment]
+        except Exception as e:
+            ytdlp_error = str(e)
 
     if raw is None:
-        if api_error and ("403" in api_error or "429" in api_error):
+        parts = [p for p in [api_error, f"yt-dlp: {ytdlp_error}" if ytdlp_error else None] if p]
+        detail = "; ".join(parts) or "unknown"
+        _BLOCK_SIGNALS = ("403", "429", "ip", "block", "cloud", "sign in", "bot")
+        if any(s in detail.lower() for s in _BLOCK_SIGNALS):
             raise CloudIpBlockedError(
-                f"YouTube blocked transcript access for {video_id} (IP rate-limited). "
-                f"Detail: {api_error}"
+                f"YouTube blocked transcript access for {video_id}. Detail: {detail}"
             )
-        raise ValueError(f"Transcript unavailable for {video_id}: {api_error}")
+        raise ValueError(f"Transcript unavailable for {video_id}: {detail}")
 
     segments: list[Segment] = []
     prev_text = ""
