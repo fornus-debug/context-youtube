@@ -272,11 +272,13 @@ def _fetch_via_invidious(video_id: str) -> list[dict] | None:
     """
     Fallback via public Invidious instances — completely bypasses YouTube IP blocking
     since the Invidious server makes the YouTube request on our behalf.
+    Raises RuntimeError with per-instance errors for diagnosis.
     """
     import urllib.request
     import json as _json
 
     _HEADERS = {"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
+    instance_errors: list[str] = []
 
     for instance in _INVIDIOUS_INSTANCES:
         # 1. Fetch caption list
@@ -284,15 +286,18 @@ def _fetch_via_invidious(video_id: str) -> list[dict] | None:
             req = urllib.request.Request(
                 f"{instance}/api/v1/captions/{video_id}", headers=_HEADERS
             )
-            with urllib.request.urlopen(req, timeout=8) as r:
+            with urllib.request.urlopen(req, timeout=12) as r:
                 if r.status != 200:
+                    instance_errors.append(f"{instance}: HTTP {r.status}")
                     continue
                 data = _json.loads(r.read())
-        except Exception:
+        except Exception as e:
+            instance_errors.append(f"{instance}: {type(e).__name__}: {e}")
             continue
 
         captions = data.get("captions", [])
         if not captions:
+            instance_errors.append(f"{instance}: no captions in response")
             continue
 
         # 2. Pick preferred language: ja > en > first available
@@ -309,6 +314,7 @@ def _fetch_via_invidious(video_id: str) -> list[dict] | None:
 
         cap_path = chosen.get("url", "")
         if not cap_path:
+            instance_errors.append(f"{instance}: caption has no url")
             continue
 
         # 3. Download VTT
@@ -316,16 +322,83 @@ def _fetch_via_invidious(video_id: str) -> list[dict] | None:
             req = urllib.request.Request(
                 f"{instance}{cap_path}", headers=_HEADERS
             )
-            with urllib.request.urlopen(req, timeout=8) as r:
+            with urllib.request.urlopen(req, timeout=12) as r:
                 if r.status != 200:
+                    instance_errors.append(f"{instance}: VTT HTTP {r.status}")
                     continue
                 vtt = r.read().decode("utf-8")
-        except Exception:
+        except Exception as e:
+            instance_errors.append(f"{instance}: VTT fetch {type(e).__name__}: {e}")
             continue
 
         segments = _parse_vtt(vtt)
         if segments:
             return segments
+        instance_errors.append(f"{instance}: VTT parsed but 0 segments")
+
+    raise RuntimeError(
+        "Invidious: all instances failed. "
+        + "; ".join(instance_errors[:5])
+    )
+
+
+_PIPED_INSTANCES = [
+    "https://pipedapi.kavin.rocks",
+    "https://pipedapi.tokhmi.xyz",
+    "https://pipedapi.adminforge.de",
+    "https://piped-api.garudalinux.org",
+]
+
+
+def _fetch_via_piped(video_id: str) -> list[dict] | None:
+    """
+    Fallback via Piped API — another YouTube frontend that proxies requests,
+    bypassing Render's cloud-IP block.
+    """
+    import urllib.request
+    import json as _json
+
+    _HEADERS = {"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
+
+    for instance in _PIPED_INSTANCES:
+        try:
+            req = urllib.request.Request(
+                f"{instance}/streams/{video_id}", headers=_HEADERS
+            )
+            with urllib.request.urlopen(req, timeout=12) as r:
+                if r.status != 200:
+                    continue
+                data = _json.loads(r.read())
+        except Exception:
+            continue
+
+        subtitles = data.get("subtitles", [])
+        if not subtitles:
+            continue
+
+        def _lang_rank(sub: dict) -> int:
+            code = sub.get("code", "")
+            if code.startswith("ja"):
+                return 0
+            if code.startswith("en"):
+                return 1
+            return 2
+
+        for sub in sorted(subtitles, key=_lang_rank):
+            url = sub.get("url")
+            if not url:
+                continue
+            try:
+                req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+                with urllib.request.urlopen(req, timeout=12) as r:
+                    if r.status != 200:
+                        continue
+                    vtt = r.read().decode("utf-8")
+            except Exception:
+                continue
+            segments = _parse_vtt(vtt)
+            if segments:
+                return segments
 
     return None
 
@@ -419,11 +492,20 @@ def fetch_transcript(
         except Exception as e:
             invidious_error = str(e)
 
+    # Piped fallback — alternative YouTube frontend with different instance pool
+    piped_error: str | None = None
+    if raw is None:
+        try:
+            raw = _fetch_via_piped(video_id)  # type: ignore[assignment]
+        except Exception as e:
+            piped_error = str(e)
+
     if raw is None:
         parts = [p for p in [
             api_error,
             f"yt-dlp: {ytdlp_error}" if ytdlp_error else None,
-            f"invidious: {invidious_error}" if invidious_error else "invidious: all instances failed",
+            invidious_error,
+            f"piped: {piped_error}" if piped_error else None,
         ] if p]
         detail = "; ".join(parts) or "unknown"
         _BLOCK_SIGNALS = ("403", "429", "ip", "block", "cloud", "sign in", "bot")
