@@ -160,6 +160,11 @@ def _fetch_via_ytdlp(video_id: str) -> list[dict] | None:
             download=False,
         )
 
+    all_cap_langs = sorted(
+        list((info.get("subtitles") or {}).keys()) +
+        list((info.get("automatic_captions") or {}).keys())
+    )
+
     for lang in ("ja", "en"):
         caps = (info.get("subtitles") or {}).get(lang) or \
                (info.get("automatic_captions") or {}).get(lang)
@@ -175,8 +180,8 @@ def _fetch_via_ytdlp(video_id: str) -> list[dict] | None:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 raw = ydl.urlopen(url).read()
                 data = _json.loads(raw.decode("utf-8") if isinstance(raw, bytes) else raw)
-        except Exception:
-            continue
+        except Exception as e:
+            raise RuntimeError(f"yt-dlp subtitle download failed for lang={lang}: {e}") from e
 
         segments = []
         for event in data.get("events", []):
@@ -193,7 +198,15 @@ def _fetch_via_ytdlp(video_id: str) -> list[dict] | None:
         if segments:
             return segments
 
-    return None
+    if all_cap_langs:
+        raise RuntimeError(
+            f"yt-dlp found captions in {all_cap_langs} but not ja/en. "
+            "Try setting languages param to match available langs."
+        )
+    raise RuntimeError(
+        "yt-dlp fetched video info but found NO captions. "
+        f"cookies_loaded={os.path.exists(_COOKIES_PATH)}"
+    )
 
 
 def _fetch_timedtext_direct(video_id: str) -> list[dict] | None:
