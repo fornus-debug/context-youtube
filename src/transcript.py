@@ -403,6 +403,51 @@ def _fetch_via_piped(video_id: str) -> list[dict] | None:
     return None
 
 
+def _fetch_via_supadata(video_id: str) -> list[dict] | None:
+    """Fallback via Supadata AI API — cloud-hosted service that handles YouTube access.
+
+    Requires SUPADATA_API_KEY environment variable (free tier: 100 req/month).
+    Raises RuntimeError on API errors so callers can surface the root cause.
+    Returns None when SUPADATA_API_KEY is not set.
+    """
+    api_key = os.getenv("SUPADATA_API_KEY", "")
+    if not api_key:
+        return None
+
+    import urllib.request
+    import json as _json
+
+    url = f"https://api.supadata.ai/v1/youtube/transcript?videoId={video_id}"
+    req = urllib.request.Request(url, headers={
+        "x-api-key": api_key,
+        "Accept": "application/json",
+    })
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            if r.status != 200:
+                raise RuntimeError(f"Supadata API returned HTTP {r.status}")
+            data = _json.loads(r.read())
+    except Exception as e:
+        raise RuntimeError(f"Supadata API error: {e}") from e
+
+    content = data.get("content")
+    if not content or not isinstance(content, list):
+        raise RuntimeError(f"Supadata returned no content for {video_id}")
+
+    segments = []
+    for item in content:
+        text = item.get("text", "").strip()
+        if not text:
+            continue
+        segments.append({
+            "text": text,
+            "start": item.get("offset", 0) / 1000,
+            "duration": item.get("duration", 0) / 1000,
+        })
+
+    return segments if segments else None
+
+
 def _fetch_timedtext_direct(video_id: str) -> list[dict] | None:
     """
     Fallback: hit YouTube's timedtext endpoint directly (bypasses video-page block).
@@ -500,12 +545,21 @@ def fetch_transcript(
         except Exception as e:
             piped_error = str(e)
 
+    # Supadata fallback — cloud API that handles YouTube access server-side
+    supadata_error: str | None = None
+    if raw is None:
+        try:
+            raw = _fetch_via_supadata(video_id)  # type: ignore[assignment]
+        except Exception as e:
+            supadata_error = str(e)
+
     if raw is None:
         parts = [p for p in [
             api_error,
             f"yt-dlp: {ytdlp_error}" if ytdlp_error else None,
             invidious_error,
             f"piped: {piped_error}" if piped_error else None,
+            f"supadata: {supadata_error}" if supadata_error else None,
         ] if p]
         detail = "; ".join(parts) or "unknown"
         _BLOCK_SIGNALS = ("403", "429", "ip", "block", "cloud", "sign in", "bot")
