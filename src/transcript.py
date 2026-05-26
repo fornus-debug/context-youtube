@@ -209,6 +209,112 @@ def _fetch_via_ytdlp(video_id: str) -> list[dict] | None:
     )
 
 
+_INVIDIOUS_INSTANCES = [
+    "https://inv.riverside.rocks",
+    "https://invidious.kavin.rocks",
+    "https://yt.artemislena.eu",
+    "https://y.com.sb",
+    "https://invidious.flokinet.is",
+    "https://vid.puffyan.us",
+    "https://invidious.nerdvpn.de",
+    "https://yt.cdaut.de",
+]
+
+_VTT_TAG_RE = re.compile(r"<[^>]+>")
+_VTT_TIME_RE = re.compile(r"(\d{2,}):(\d{2}):(\d{2}\.\d+)")
+
+
+def _vtt_time_to_sec(t: tuple) -> float:
+    return int(t[0]) * 3600 + int(t[1]) * 60 + float(t[2])
+
+
+def _parse_vtt(content: str) -> list[dict]:
+    segments = []
+    for block in re.split(r"\n\n+", content.strip()):
+        lines = [l.strip() for l in block.strip().splitlines()]
+        for i, line in enumerate(lines):
+            if "-->" not in line:
+                continue
+            times = _VTT_TIME_RE.findall(line)
+            if len(times) < 2:
+                break
+            start = _vtt_time_to_sec(times[0])
+            end = _vtt_time_to_sec(times[1])
+            text = " ".join(
+                _VTT_TAG_RE.sub("", l).strip() for l in lines[i + 1:]
+            ).strip()
+            if text:
+                segments.append({
+                    "text": text,
+                    "start": start,
+                    "duration": end - start,
+                })
+            break
+    return segments
+
+
+def _fetch_via_invidious(video_id: str) -> list[dict] | None:
+    """
+    Fallback via public Invidious instances — completely bypasses YouTube IP blocking
+    since the Invidious server makes the YouTube request on our behalf.
+    """
+    import urllib.request
+    import json as _json
+
+    _HEADERS = {"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
+
+    for instance in _INVIDIOUS_INSTANCES:
+        # 1. Fetch caption list
+        try:
+            req = urllib.request.Request(
+                f"{instance}/api/v1/captions/{video_id}", headers=_HEADERS
+            )
+            with urllib.request.urlopen(req, timeout=8) as r:
+                if r.status != 200:
+                    continue
+                data = _json.loads(r.read())
+        except Exception:
+            continue
+
+        captions = data.get("captions", [])
+        if not captions:
+            continue
+
+        # 2. Pick preferred language: ja > en > first available
+        chosen = None
+        for lang_prefix in ("ja", "en"):
+            chosen = next(
+                (c for c in captions if c.get("language_code", "").startswith(lang_prefix)),
+                None,
+            )
+            if chosen:
+                break
+        if not chosen:
+            chosen = captions[0]
+
+        cap_path = chosen.get("url", "")
+        if not cap_path:
+            continue
+
+        # 3. Download VTT
+        try:
+            req = urllib.request.Request(
+                f"{instance}{cap_path}", headers=_HEADERS
+            )
+            with urllib.request.urlopen(req, timeout=8) as r:
+                if r.status != 200:
+                    continue
+                vtt = r.read().decode("utf-8")
+        except Exception:
+            continue
+
+        segments = _parse_vtt(vtt)
+        if segments:
+            return segments
+
+    return None
+
+
 def _fetch_timedtext_direct(video_id: str) -> list[dict] | None:
     """
     Fallback: hit YouTube's timedtext endpoint directly (bypasses video-page block).
@@ -290,8 +396,20 @@ def fetch_transcript(
         except Exception as e:
             ytdlp_error = str(e)
 
+    # Invidious fallback — public instances bypass YouTube IP blocking entirely
+    invidious_error: str | None = None
     if raw is None:
-        parts = [p for p in [api_error, f"yt-dlp: {ytdlp_error}" if ytdlp_error else None] if p]
+        try:
+            raw = _fetch_via_invidious(video_id)  # type: ignore[assignment]
+        except Exception as e:
+            invidious_error = str(e)
+
+    if raw is None:
+        parts = [p for p in [
+            api_error,
+            f"yt-dlp: {ytdlp_error}" if ytdlp_error else None,
+            f"invidious: {invidious_error}" if invidious_error else "invidious: all instances failed",
+        ] if p]
         detail = "; ".join(parts) or "unknown"
         _BLOCK_SIGNALS = ("403", "429", "ip", "block", "cloud", "sign in", "bot")
         if any(s in detail.lower() for s in _BLOCK_SIGNALS):
