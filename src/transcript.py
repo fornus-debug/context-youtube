@@ -12,7 +12,16 @@ import re
 from dataclasses import dataclass
 
 from youtube_transcript_api import YouTubeTranscriptApi
-from youtube_transcript_api._errors import TranscriptsDisabled, NoTranscriptFound
+from youtube_transcript_api._errors import (
+    TranscriptsDisabled,
+    NoTranscriptFound,
+    YouTubeRequestFailed,
+)
+
+
+class CloudIpBlockedError(ValueError):
+    """YouTube is blocking transcript requests from this cloud IP address."""
+    pass
 
 
 @dataclass
@@ -71,8 +80,31 @@ def _is_duplicate(a: str, b: str, threshold: float = 0.85) -> bool:
     return (intersection / union) >= threshold
 
 
+_COOKIES_PATH = os.getenv("YOUTUBE_COOKIES_FILE", "/etc/secrets/youtube_cookies.txt")
+
+
 def _make_api() -> YouTubeTranscriptApi:
-    """Build YouTubeTranscriptApi instance with proxy if env vars are set."""
+    """Build YouTubeTranscriptApi instance.
+
+    Priority:
+    1. Cookies file (YOUTUBE_COOKIES_FILE or /etc/secrets/youtube_cookies.txt)
+    2. Webshare proxy (WEBSHARE_PROXY_USERNAME + WEBSHARE_PROXY_PASSWORD)
+    3. Generic proxy (YOUTUBE_PROXY_HTTP / YOUTUBE_PROXY_HTTPS)
+    4. No auth (local dev only)
+    """
+    import http.cookiejar
+    import requests
+
+    session: requests.Session | None = None
+    if os.path.exists(_COOKIES_PATH):
+        jar = http.cookiejar.MozillaCookieJar(_COOKIES_PATH)
+        try:
+            jar.load(ignore_discard=True, ignore_expires=True)
+            session = requests.Session()
+            session.cookies = jar  # type: ignore[assignment]
+        except Exception:
+            session = None  # corrupt/empty cookies file — fall through
+
     ws_user = os.getenv("WEBSHARE_PROXY_USERNAME", "")
     ws_pass = os.getenv("WEBSHARE_PROXY_PASSWORD", "")
     if ws_user and ws_pass:
@@ -81,7 +113,8 @@ def _make_api() -> YouTubeTranscriptApi:
             proxy_config=WebshareProxyConfig(
                 proxy_username=ws_user,
                 proxy_password=ws_pass,
-            )
+            ),
+            http_client=session,
         )
 
     http_proxy = os.getenv("YOUTUBE_PROXY_HTTP", "")
@@ -92,10 +125,68 @@ def _make_api() -> YouTubeTranscriptApi:
             proxy_config=GenericProxyConfig(
                 http_url=http_proxy or None,
                 https_url=https_proxy or None,
-            )
+            ),
+            http_client=session,
         )
 
-    return YouTubeTranscriptApi()
+    return YouTubeTranscriptApi(http_client=session)
+
+
+def _fetch_via_ytdlp(video_id: str) -> list[dict] | None:
+    """Fallback using yt-dlp — bypasses cloud-IP 429 rate-limiting."""
+    try:
+        import yt_dlp
+        import json as _json
+    except ImportError:
+        return None
+
+    ydl_opts: dict = {"skip_download": True, "quiet": True, "no_warnings": True}
+    if os.path.exists(_COOKIES_PATH):
+        ydl_opts["cookiefile"] = _COOKIES_PATH
+
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(
+                f"https://www.youtube.com/watch?v={video_id}",
+                download=False,
+            )
+    except Exception:
+        return None
+
+    for lang in ("ja", "en"):
+        caps = (info.get("subtitles") or {}).get(lang) or \
+               (info.get("automatic_captions") or {}).get(lang)
+        if not caps:
+            continue
+        url = next(
+            (c["url"] for c in caps if c.get("ext") == "json3"),
+            caps[0].get("url") if caps else None,
+        )
+        if not url:
+            continue
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                raw = ydl.urlopen(url).read()
+                data = _json.loads(raw.decode("utf-8") if isinstance(raw, bytes) else raw)
+        except Exception:
+            continue
+
+        segments = []
+        for event in data.get("events", []):
+            segs = event.get("segs", [])
+            if not segs:
+                continue
+            text = "".join(s.get("utf8", "") for s in segs).strip()
+            if text and text.strip() != "\n":
+                segments.append({
+                    "text": text,
+                    "start": event.get("tStartMs", 0) / 1000,
+                    "duration": event.get("dDurationMs", 0) / 1000,
+                })
+        if segments:
+            return segments
+
+    return None
 
 
 def _fetch_timedtext_direct(video_id: str) -> list[dict] | None:
@@ -156,6 +247,7 @@ def fetch_transcript(
     """
     api = _make_api()
     raw = None
+    api_error: str | None = None
     try:
         raw = api.fetch(video_id, languages=list(languages))
     except TranscriptsDisabled as e:
@@ -165,17 +257,22 @@ def fetch_transcript(
             tl = api.list(video_id)
             transcript = next(iter(tl))
             raw = transcript.fetch()
-        except Exception:
-            pass
-    except Exception:
-        pass  # blocked / network error — try direct fallback below
+        except Exception as e:
+            api_error = str(e)
+    except Exception as e:
+        api_error = str(e)
+
+    # yt-dlp fallback — handles cloud-IP 429/403 that blocks youtube-transcript-api
+    if raw is None:
+        raw = _fetch_via_ytdlp(video_id)  # type: ignore[assignment]
 
     if raw is None:
-        direct = _fetch_timedtext_direct(video_id)
-        if direct:
-            raw = direct  # type: ignore[assignment]
-        else:
-            raise ValueError(f"Transcript unavailable for {video_id}")
+        if api_error and ("403" in api_error or "429" in api_error):
+            raise CloudIpBlockedError(
+                f"YouTube blocked transcript access for {video_id} (IP rate-limited). "
+                f"Detail: {api_error}"
+            )
+        raise ValueError(f"Transcript unavailable for {video_id}: {api_error}")
 
     segments: list[Segment] = []
     prev_text = ""
