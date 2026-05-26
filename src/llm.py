@@ -127,13 +127,13 @@ class GroqClient:
 
 _EXTRACT_MODELS: dict[str, str] = {
     "anthropic": "claude-haiku-4-5-20251001",
-    "gemini":    "gemini-1.5-flash",
+    "gemini":    "gemini-2.0-flash",
     "groq":      "llama-3.3-70b-versatile",
 }
 
 _ANSWER_MODELS: dict[str, str] = {
     "anthropic": os.getenv("CLAUDE_MODEL", "claude-sonnet-4-6"),
-    "gemini":    "gemini-1.5-flash",
+    "gemini":    "gemini-2.0-flash",
     "groq":      "llama-3.3-70b-versatile",
 }
 

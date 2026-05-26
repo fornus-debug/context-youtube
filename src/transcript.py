@@ -12,16 +12,7 @@ import re
 from dataclasses import dataclass
 
 from youtube_transcript_api import YouTubeTranscriptApi
-from youtube_transcript_api._errors import (
-    TranscriptsDisabled,
-    NoTranscriptFound,
-    YouTubeRequestFailed,
-)
-
-
-class CloudIpBlockedError(ValueError):
-    """YouTube is blocking transcript requests from this cloud IP address."""
-    pass
+from youtube_transcript_api._errors import TranscriptsDisabled, NoTranscriptFound
 
 
 @dataclass
@@ -80,31 +71,8 @@ def _is_duplicate(a: str, b: str, threshold: float = 0.85) -> bool:
     return (intersection / union) >= threshold
 
 
-_COOKIES_PATH = os.getenv("YOUTUBE_COOKIES_FILE", "/etc/secrets/youtube_cookies.txt")
-
-
 def _make_api() -> YouTubeTranscriptApi:
-    """Build YouTubeTranscriptApi instance.
-
-    Priority:
-    1. Cookies file (YOUTUBE_COOKIES_FILE or /etc/secrets/youtube_cookies.txt)
-    2. Webshare proxy (WEBSHARE_PROXY_USERNAME + WEBSHARE_PROXY_PASSWORD)
-    3. Generic proxy (YOUTUBE_PROXY_HTTP / YOUTUBE_PROXY_HTTPS)
-    4. No auth (local dev only)
-    """
-    import http.cookiejar
-    import requests
-
-    session: requests.Session | None = None
-    if os.path.exists(_COOKIES_PATH):
-        jar = http.cookiejar.MozillaCookieJar(_COOKIES_PATH)
-        try:
-            jar.load(ignore_discard=True, ignore_expires=True)
-            session = requests.Session()
-            session.cookies = jar  # type: ignore[assignment]
-        except Exception:
-            session = None  # corrupt/empty cookies file — fall through
-
+    """Build YouTubeTranscriptApi instance with proxy if env vars are set."""
     ws_user = os.getenv("WEBSHARE_PROXY_USERNAME", "")
     ws_pass = os.getenv("WEBSHARE_PROXY_PASSWORD", "")
     if ws_user and ws_pass:
@@ -113,8 +81,7 @@ def _make_api() -> YouTubeTranscriptApi:
             proxy_config=WebshareProxyConfig(
                 proxy_username=ws_user,
                 proxy_password=ws_pass,
-            ),
-            http_client=session,
+            )
         )
 
     http_proxy = os.getenv("YOUTUBE_PROXY_HTTP", "")
@@ -125,11 +92,58 @@ def _make_api() -> YouTubeTranscriptApi:
             proxy_config=GenericProxyConfig(
                 http_url=http_proxy or None,
                 https_url=https_proxy or None,
-            ),
-            http_client=session,
+            )
         )
 
-    return YouTubeTranscriptApi(http_client=session)
+    return YouTubeTranscriptApi()
+
+
+def _fetch_timedtext_direct(video_id: str) -> list[dict] | None:
+    """
+    Fallback: hit YouTube's timedtext endpoint directly (bypasses video-page block).
+    Returns raw segment dicts or None if unavailable.
+    """
+    import urllib.request
+    import json as _json
+
+    for lang in ("ja", "en", ""):
+        params = f"v={video_id}&fmt=json3"
+        if lang:
+            params += f"&lang={lang}"
+        url = f"https://www.youtube.com/api/timedtext?{params}"
+        try:
+            req = urllib.request.Request(url, headers={
+                "User-Agent": (
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/124.0.0.0 Safari/537.36"
+                ),
+                "Accept-Language": "ja,en-US;q=0.9,en;q=0.8",
+                "Referer": f"https://www.youtube.com/watch?v={video_id}",
+            })
+            with urllib.request.urlopen(req, timeout=10) as r:
+                if r.status != 200:
+                    continue
+                data = _json.loads(r.read())
+        except Exception:
+            continue
+
+        segments = []
+        for event in data.get("events", []):
+            segs = event.get("segs", [])
+            if not segs:
+                continue
+            text = "".join(s.get("utf8", "") for s in segs).strip()
+            if text and text.strip() != "\n":
+                segments.append({
+                    "text": text,
+                    "start": event.get("tStartMs", 0) / 1000,
+                    "duration": event.get("dDurationMs", 0) / 1000,
+                })
+        if segments:
+            return segments
+
+    return None
 
 
 def fetch_transcript(
@@ -141,34 +155,27 @@ def fetch_transcript(
     Returns cleaned, deduplicated segments.
     """
     api = _make_api()
+    raw = None
     try:
         raw = api.fetch(video_id, languages=list(languages))
     except TranscriptsDisabled as e:
         raise ValueError(f"Transcript unavailable for {video_id}: {e}") from e
     except NoTranscriptFound:
-        # Preferred languages not found — fall back to any available transcript
         try:
             tl = api.list(video_id)
             transcript = next(iter(tl))
             raw = transcript.fetch()
-        except YouTubeRequestFailed as e:
-            if "403" in str(e):
-                raise CloudIpBlockedError(
-                    f"YouTube blocked transcript access for {video_id} (403 Forbidden). "
-                    "Running on a cloud IP — set WEBSHARE_PROXY_USERNAME + "
-                    "WEBSHARE_PROXY_PASSWORD (webshare.io) or YOUTUBE_PROXY_HTTP to bypass."
-                ) from e
-            raise ValueError(f"Transcript unavailable for {video_id}: {e}") from e
-        except Exception as e:
-            raise ValueError(f"Transcript unavailable for {video_id}: {e}") from e
-    except YouTubeRequestFailed as e:
-        if "403" in str(e):
-            raise CloudIpBlockedError(
-                f"YouTube blocked transcript access for {video_id} (403 Forbidden). "
-                "Running on a cloud IP — set WEBSHARE_PROXY_USERNAME + "
-                "WEBSHARE_PROXY_PASSWORD (webshare.io) or YOUTUBE_PROXY_HTTP to bypass."
-            ) from e
-        raise ValueError(f"Transcript unavailable for {video_id}: {e}") from e
+        except Exception:
+            pass
+    except Exception:
+        pass  # blocked / network error — try direct fallback below
+
+    if raw is None:
+        direct = _fetch_timedtext_direct(video_id)
+        if direct:
+            raw = direct  # type: ignore[assignment]
+        else:
+            raise ValueError(f"Transcript unavailable for {video_id}")
 
     segments: list[Segment] = []
     prev_text = ""

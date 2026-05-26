@@ -29,7 +29,18 @@ Flow:
 
 import os
 import re
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
+
+_video_locks: dict[str, threading.Lock] = {}
+_video_locks_lock = threading.Lock()
+
+
+def _get_video_lock(video_id: str) -> threading.Lock:
+    with _video_locks_lock:
+        if video_id not in _video_locks:
+            _video_locks[video_id] = threading.Lock()
+        return _video_locks[video_id]
 
 from dotenv import load_dotenv
 
@@ -42,7 +53,7 @@ from .knowledge.extractor import extract
 from .knowledge.merger import merge_objects
 from .knowledge.store import load_all, save, semantic_search, semantic_search_multi, video_indexed
 from .llm import get_answer_client, provider_label
-from .transcript import fetch_transcript, merge_into_chunks, CloudIpBlockedError
+from .transcript import fetch_transcript, merge_into_chunks
 from .youtube_search import search as youtube_search
 
 load_dotenv()
@@ -186,34 +197,33 @@ def _process_video(video_id: str, force_refresh: bool, verbose: bool) -> list:
     """
     Fetch transcript, extract knowledge objects, and persist for a single video.
     Returns the list of KnowledgeObjects stored (or already present).
-    Called in parallel by run_search.
+    Called in parallel by run_search. Per-video lock prevents duplicate extraction.
     """
-    if video_indexed(video_id) and not force_refresh:
-        if verbose:
-            objs = load_all(video_id)
-            print(f"[extract:{video_id}] Already indexed ({len(objs)} objects)")
-        return load_all(video_id)
+    with _get_video_lock(video_id):
+        if video_indexed(video_id) and not force_refresh:
+            if verbose:
+                objs = load_all(video_id)
+                print(f"[extract:{video_id}] Already indexed ({len(objs)} objects)")
+            return load_all(video_id)
 
-    if verbose:
-        print(f"[transcript:{video_id}] Fetching...")
-    try:
-        segments = fetch_transcript(video_id)
-    except CloudIpBlockedError:
-        raise  # propagate — let run_search report the real cause
-    except Exception as exc:
         if verbose:
-            print(f"[transcript:{video_id}] No transcript: {exc}")
-        raise  # propagate with real error — run_search will surface it
-    chunks = merge_into_chunks(segments, chunk_tokens=120, overlap_segments=1)
-    if verbose:
-        print(f"[transcript:{video_id}] {len(segments)} segments → {len(chunks)} chunks")
+            print(f"[transcript:{video_id}] Fetching...")
+        try:
+            segments = fetch_transcript(video_id)
+        except Exception as exc:
+            if verbose:
+                print(f"[transcript:{video_id}] No transcript: {exc}")
+            return []  # skip gracefully — no subtitles
+        chunks = merge_into_chunks(segments, chunk_tokens=120, overlap_segments=1)
+        if verbose:
+            print(f"[transcript:{video_id}] {len(segments)} segments → {len(chunks)} chunks")
 
-    if verbose:
-        print(f"[extract:{video_id}] Running Haiku extraction...")
-    compressed = _compress_for_extraction(chunks)
-    objects = extract(video_id, compressed, verbose=verbose)
-    save(objects)
-    return objects
+        if verbose:
+            print(f"[extract:{video_id}] Running Haiku extraction...")
+        compressed = _compress_for_extraction(chunks)
+        objects = extract(video_id, compressed, verbose=verbose)
+        save(objects)
+        return objects
 
 
 def run_search(
@@ -280,8 +290,7 @@ def run_search(
     video_ids = [v["id"] for v in videos]
     objects_by_video: dict[str, list] = {}
 
-    transcript_errors: list[str] = []
-    ip_blocked_count = 0
+    extraction_errors = []
     with ThreadPoolExecutor(max_workers=min(len(video_ids), 4)) as pool:
         future_to_id = {
             pool.submit(_process_video, vid, force_refresh, verbose): vid
@@ -291,17 +300,9 @@ def run_search(
             vid = future_to_id[future]
             try:
                 objects_by_video[vid] = future.result()
-            except CloudIpBlockedError as exc:
-                if verbose:
-                    print(f"[warn] Video {vid} IP blocked: {exc}")
-                objects_by_video[vid] = []
-                ip_blocked_count += 1
-                transcript_errors.append(f"{vid}: {exc}")
             except Exception as exc:
-                if verbose:
-                    print(f"[warn] Video {vid} failed: {exc}")
+                extraction_errors.append(f"{vid}: {exc}")
                 objects_by_video[vid] = []
-                transcript_errors.append(f"{vid}: {type(exc).__name__}: {exc}")
 
     # ── 4. Load all objects (ensure all are from store) ─────────────────────
     for vid in video_ids:
@@ -309,19 +310,13 @@ def run_search(
             objects_by_video[vid] = load_all(vid)
 
     # ── 5. Cross-video deduplication ─────────────────────────────────────────
+    merged = merge_objects(objects_by_video)
     total_objects = sum(len(v) for v in objects_by_video.values())
     if total_objects == 0:
-        error_detail = "; ".join(transcript_errors) if transcript_errors else "unknown"
-        if ip_blocked_count > 0:
-            raise RuntimeError(
-                "YouTube is blocking transcript requests from this server's IP address. "
-                "To fix: set WEBSHARE_PROXY_USERNAME + WEBSHARE_PROXY_PASSWORD "
-                f"(webshare.io free tier) or YOUTUBE_PROXY_HTTP env var. Detail: {error_detail}"
-            )
         raise RuntimeError(
-            f"Could not fetch transcripts for any of the found videos. Detail: {error_detail}"
+            "None of the found videos have subtitles/captions enabled. "
+            "Try a more specific query or a query in a language with more captioned videos."
         )
-    merged = merge_objects(objects_by_video)
     if verbose:
         total_before = sum(len(v) for v in objects_by_video.values())
         print(f"[merge] {total_before} objects → {len(merged)} after dedup")
