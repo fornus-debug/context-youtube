@@ -141,6 +141,8 @@ def _fetch_via_ytdlp(video_id: str) -> list[dict] | None:
     try:
         import yt_dlp
         import json as _json
+        import tempfile
+        import shutil
     except ImportError:
         return None
 
@@ -150,15 +152,26 @@ def _fetch_via_ytdlp(video_id: str) -> list[dict] | None:
         "no_warnings": True,
         "nocheckcertificate": True,
     }
-    if os.path.exists(_COOKIES_PATH):
-        ydl_opts["cookiefile"] = _COOKIES_PATH
 
-    # Let extract_info exceptions propagate — callers need the error detail
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(
-            f"https://www.youtube.com/watch?v={video_id}",
-            download=False,
-        )
+    # /etc/secrets/ is read-only on Render; copy cookies to a writable temp file
+    tmp_cookies: str | None = None
+    if os.path.exists(_COOKIES_PATH):
+        tmp = tempfile.NamedTemporaryFile(suffix=".txt", delete=False)
+        tmp.close()
+        shutil.copy2(_COOKIES_PATH, tmp.name)
+        tmp_cookies = tmp.name
+        ydl_opts["cookiefile"] = tmp_cookies
+
+    try:
+        # Let extract_info exceptions propagate — callers need the error detail
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(
+                f"https://www.youtube.com/watch?v={video_id}",
+                download=False,
+            )
+    finally:
+        if tmp_cookies and os.path.exists(tmp_cookies):
+            os.unlink(tmp_cookies)
 
     all_cap_langs = sorted(
         list((info.get("subtitles") or {}).keys()) +
@@ -210,14 +223,16 @@ def _fetch_via_ytdlp(video_id: str) -> list[dict] | None:
 
 
 _INVIDIOUS_INSTANCES = [
+    "https://invidious.io",
     "https://inv.riverside.rocks",
     "https://invidious.kavin.rocks",
     "https://yt.artemislena.eu",
-    "https://y.com.sb",
     "https://invidious.flokinet.is",
-    "https://vid.puffyan.us",
+    "https://invidious.privacydev.net",
+    "https://iv.melmac.space",
+    "https://invidious.perennialte.ch",
+    "https://y.com.sb",
     "https://invidious.nerdvpn.de",
-    "https://yt.cdaut.de",
 ]
 
 _VTT_TAG_RE = re.compile(r"<[^>]+>")
